@@ -100,30 +100,32 @@ function applyMarkup(cjPrice) {
   return Math.round(price * 100) / 100;
 }
 
-// Haalt de trending producten voor één sectie op (met wekelijkse caching,
-// zodat een eenmaal getoond product blijft staan totdat de week om is —
-// of totdat je force:true gebruikt om handmatig te verversen).
-async function getTrendingProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
+// Haalt de producten voor één sectie op bij CJ, gefilterd op een
+// productFlag (0 = trending, 1 = nieuw), met wekelijkse caching per
+// namespace+sectie zodat een eenmaal getoond product blijft staan totdat
+// de week om is — of totdat je force:true gebruikt om handmatig te
+// verversen.
+async function fetchProductsByFlag(section, productFlag, { size, force, maxPages, cacheNamespace }) {
+  const cacheKey = `${cacheNamespace}:${section}`;
   const cache = readCache(TRENDING_CACHE_PATH) || {};
-  const cached = cache[section];
+  const cached = cache[cacheKey];
   if (!force && cached && Date.now() - cached.fetchedAt < TRENDING_TTL_MS) {
     return cached.products;
   }
 
   const categoryIds = await resolveCategoryIds(section);
   if (categoryIds.length === 0) {
-    console.warn(`Geen CJ-categorieën gevonden voor sectie "${section}"`);
+    console.warn(`No CJ categories found for section "${section}"`);
     return [];
   }
 
   const accessToken = await getValidAccessToken();
 
-  // CJ levert voor een flink deel van de producten geen sellPrice mee
-  // (schijnt normaal te zijn voor bepaalde producttypes bij hen). We halen
-  // daarom desnoods meerdere pagina's op — elke pagina op CJ's maximum van
-  // 100 — totdat we genoeg producten MET geldige prijs hebben verzameld,
-  // met een bovengrens (maxPages) zodat we niet oneindig doorzoeken als een
-  // categorie structureel weinig geprijsde producten heeft.
+  // CJ doesn't populate sellPrice for a large chunk of products (seems to
+  // be normal for certain product types on their end). We therefore fetch
+  // extra pages — each at CJ's maximum of 100 — until we've collected
+  // enough priced products, with an upper bound (maxPages) so we don't
+  // search forever if a category structurally has few priced products.
   const seenPids = new Set();
   const collected = [];
   let page = 1;
@@ -133,31 +135,31 @@ async function getTrendingProducts(section, { size = 24, force = false, maxPages
       headers: { "CJ-Access-Token": accessToken },
       params: {
         page,
-        size: 100, // CJ's maximum per pagina
-        lv3categoryList: categoryIds.slice(0, 50), // CJ limiteert de lijstlengte in de praktijk
-        productFlag: 0, // 0 = Trending products (CJ's eigen big-data signaal)
-        orderBy: 1, // sorteer op listing count = populariteit-proxy
+        size: 100, // CJ's max per page
+        lv3categoryList: categoryIds.slice(0, 50), // CJ limits list length in practice
+        productFlag, // 0 = trending, 1 = new products
+        orderBy: 1, // sort by listing count = popularity proxy
         sort: "desc",
-        verifiedWarehouse: 1, // alleen geverifieerde voorraad, dus betrouwbaar leverbaar
-        startWarehouseInventory: 10, // niet bijna-uitverkocht tonen
+        verifiedWarehouse: 1, // only verified stock, so reliably fulfillable
+        startWarehouseInventory: 10, // avoid near-out-of-stock items
         features: ["enable_category"],
       },
-      paramsSerializer: { indexes: null }, // arrays als herhaalde query-params, zoals CJ verwacht
+      paramsSerializer: { indexes: null }, // arrays as repeated query params, as CJ expects
     });
 
-    if (!data.result) throw new Error(`Trending producten ophalen mislukt: ${data.message}`);
+    if (!data.result) throw new Error(`Failed to fetch products: ${data.message}`);
 
     const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
-    if (rawProducts.length === 0) break; // geen resultaten meer op verdere pagina's
+    if (rawProducts.length === 0) break; // no more results on further pages
 
     for (const p of rawProducts) {
-      if (seenPids.has(p.id)) continue; // voorkom dubbele producten tussen pagina's
+      if (seenPids.has(p.id)) continue; // avoid duplicate products across pages
       seenPids.add(p.id);
 
-      // Niet elk product heeft een gevulde sellPrice — val dan terug op de
-      // andere prijsvelden die CJ soms wel invult.
+      // Not every product has a filled-in sellPrice — fall back to the
+      // other price fields CJ sometimes does populate.
       const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
-      if (rawPrice === null) continue; // alleen producten MET geldige prijs bewaren we
+      if (rawPrice === null) continue; // only keep products WITH a valid price
 
       collected.push({
         pid: p.id,
@@ -178,14 +180,24 @@ async function getTrendingProducts(section, { size = 24, force = false, maxPages
 
   if (products.length < size) {
     console.warn(
-      `Sectie "${section}": maar ${products.length}/${size} producten met geldige prijs gevonden (na ${page - 1} pagina('s) bij CJ doorzocht).`
+      `Section "${section}" (${cacheNamespace}): only found ${products.length}/${size} priced products (searched ${page - 1} page(s) at CJ).`
     );
   }
 
-  cache[section] = { fetchedAt: Date.now(), products };
+  cache[cacheKey] = { fetchedAt: Date.now(), products };
   writeCache(TRENDING_CACHE_PATH, cache);
 
   return products;
+}
+
+async function getTrendingProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
+  return fetchProductsByFlag(section, 0, { size, force, maxPages, cacheNamespace: "trending" });
+}
+
+// Nieuw-binnen feed voor de homepage — gebruikt CJ's "New products"-signaal
+// (productFlag=1) in plaats van "Trending" (productFlag=0).
+async function getNewProducts(section, { size = 12, force = false, maxPages = 6 } = {}) {
+  return fetchProductsByFlag(section, 1, { size, force, maxPages, cacheNamespace: "new" });
 }
 
 // Haalt varianten (maat/kleur + het cjVid dat je nodig hebt bij checkout)
@@ -223,4 +235,4 @@ async function getProductVariants(pid) {
   };
 }
 
-module.exports = { getTrendingProducts, getProductVariants };
+module.exports = { getTrendingProducts, getNewProducts, getProductVariants };

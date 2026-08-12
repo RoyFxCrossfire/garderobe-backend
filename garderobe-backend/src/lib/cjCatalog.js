@@ -6,7 +6,7 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
-const { getValidAccessToken } = require("./cjClient");
+const { getValidAccessToken, cjRequest } = require("./cjClient");
 
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 const CATEGORY_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-category-cache.json");
@@ -124,9 +124,11 @@ async function getCategoryTree() {
   }
 
   const accessToken = await getValidAccessToken();
-  const { data } = await axios.get(`${CJ_BASE}/product/getCategory`, {
-    headers: { "CJ-Access-Token": accessToken },
-  });
+  const { data } = await cjRequest(() =>
+    axios.get(`${CJ_BASE}/product/getCategory`, {
+      headers: { "CJ-Access-Token": accessToken },
+    })
+  );
   if (!data.result) throw new Error(`Failed to fetch category tree: ${data.message}`);
 
   writeCache(CATEGORY_CACHE_PATH, { fetchedAt: Date.now(), tree: data.data });
@@ -210,21 +212,23 @@ async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, for
   let page = 1;
 
   while (collected.length < size && page <= maxPages) {
-    const { data } = await axios.get(`${CJ_BASE}/product/listV2`, {
-      headers: { "CJ-Access-Token": accessToken },
-      params: {
-        page,
-        size: 100,
-        lv3categoryList: categoryIds.slice(0, 50), // CJ limits list length in practice
-        ...(productFlag != null ? { productFlag } : {}), // 0 = trending, 1 = new, omitted = whole category
-        orderBy: 1,
-        sort: "desc",
-        verifiedWarehouse: 1,
-        startWarehouseInventory: 10,
-        features: ["enable_category"],
-      },
-      paramsSerializer: { indexes: null },
-    });
+    const { data } = await cjRequest(() =>
+      axios.get(`${CJ_BASE}/product/listV2`, {
+        headers: { "CJ-Access-Token": accessToken },
+        params: {
+          page,
+          size: 100,
+          lv3categoryList: categoryIds.slice(0, 50), // CJ limits list length in practice
+          ...(productFlag != null ? { productFlag } : {}), // 0 = trending, 1 = new, omitted = whole category
+          orderBy: 1,
+          sort: "desc",
+          verifiedWarehouse: 1,
+          startWarehouseInventory: 10,
+          features: ["enable_category"],
+        },
+        paramsSerializer: { indexes: null },
+      })
+    );
 
     if (!data.result) throw new Error(`Failed to fetch products: ${data.message}`);
 
@@ -299,10 +303,12 @@ async function getTrendingProducts(section, opts) {
 // product — only needed once a customer opens a product page.
 async function getProductVariants(pid) {
   const accessToken = await getValidAccessToken();
-  const { data } = await axios.get(`${CJ_BASE}/product/query`, {
-    headers: { "CJ-Access-Token": accessToken },
-    params: { pid },
-  });
+  const { data } = await cjRequest(() =>
+    axios.get(`${CJ_BASE}/product/query`, {
+      headers: { "CJ-Access-Token": accessToken },
+      params: { pid },
+    })
+  );
   if (!data.result) throw new Error(`Failed to fetch product details: ${data.message}`);
 
   const p = data.data;

@@ -27,37 +27,46 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// CJ staat maar 1 aanvraag per seconde toe op hun authenticatie-endpoints
-// ("QPS limit is 1 time/1second"). Als meerdere delen van onze code
-// tegelijk een token nodig hebben (bv. de "nieuw binnen"-route die alle
-// secties parallel opvraagt), zou elk apart een login-aanvraag doen en
-// elkaars limiet overschrijden. Deze retry-wrapper vangt een 429 op en
-// probeert het na een korte pauze automatisch opnieuw.
-async function postWithRetry(url, body, { retries = 3, delayMs = 1200 } = {}) {
+// CJ staat maar 1 aanvraag per seconde toe — op meerdere van hun endpoints,
+// niet alleen inloggen (we zagen dit ook op /product/listV2). Deze functie
+// is de ENIGE plek in de hele backend die rechtstreeks met CJ praat: elke
+// aanroep (login, categorieboom, productlijsten, varianten, order
+// aanmaken) moet hier doorheen. Dat garandeert dat er nooit twee CJ-
+// aanvragen te dicht op elkaar de deur uit gaan, ongeacht welk deel van de
+// code erom vraagt — en als CJ tóch een keer 429 teruggeeft, proberen we
+// het na een oplopende pauze automatisch opnieuw.
+let lastCallAt = 0;
+const MIN_INTERVAL_MS = 1100; // iets ruimer dan CJ's "1 keer per seconde"
+
+async function cjRequest(requestFn, { retries = 4 } = {}) {
   for (let attempt = 1; attempt <= retries; attempt++) {
+    const wait = lastCallAt + MIN_INTERVAL_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastCallAt = Date.now();
+
     try {
-      return await axios.post(url, body);
+      return await requestFn();
     } catch (err) {
       const isRateLimited = err.response?.status === 429;
       if (!isRateLimited || attempt === retries) throw err;
-      await sleep(delayMs * attempt); // elke poging iets langer wachten
+      await sleep(1500 * attempt); // elke volgende poging iets langer wachten
     }
   }
 }
 
 async function fetchNewAccessToken() {
-  const { data } = await postWithRetry(`${CJ_BASE}/authentication/getAccessToken`, {
-    apiKey: process.env.CJ_API_KEY,
-  });
+  const { data } = await cjRequest(() =>
+    axios.post(`${CJ_BASE}/authentication/getAccessToken`, { apiKey: process.env.CJ_API_KEY })
+  );
   if (!data.result) throw new Error(`CJ auth mislukt: ${data.message}`);
   saveTokens(data.data);
   return data.data;
 }
 
 async function refreshAccessToken(refreshToken) {
-  const { data } = await postWithRetry(`${CJ_BASE}/authentication/refreshAccessToken`, {
-    refreshToken,
-  });
+  const { data } = await cjRequest(() =>
+    axios.post(`${CJ_BASE}/authentication/refreshAccessToken`, { refreshToken })
+  );
   if (!data.result) {
     // Refresh token is ook verlopen/ongeldig -> volledig opnieuw inloggen
     return fetchNewAccessToken();
@@ -133,12 +142,14 @@ async function createCjOrder(order) {
     })),
   };
 
-  const { data } = await axios.post(`${CJ_BASE}/shopping/order/createOrderV3`, payload, {
-    headers: {
-      "CJ-Access-Token": accessToken,
-      "Content-Type": "application/json",
-    },
-  });
+  const { data } = await cjRequest(() =>
+    axios.post(`${CJ_BASE}/shopping/order/createOrderV3`, payload, {
+      headers: {
+        "CJ-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+    })
+  );
 
   if (!data.result) {
     throw new Error(`CJ order aanmaken mislukt: ${data.message}`);
@@ -147,4 +158,4 @@ async function createCjOrder(order) {
   return data.data; // bevat o.a. orderId, orderStatus, cjPayUrl
 }
 
-module.exports = { getValidAccessToken, createCjOrder };
+module.exports = { getValidAccessToken, createCjOrder, cjRequest };

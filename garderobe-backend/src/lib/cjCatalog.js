@@ -103,7 +103,7 @@ function applyMarkup(cjPrice) {
 // Haalt de trending producten voor één sectie op (met wekelijkse caching,
 // zodat een eenmaal getoond product blijft staan totdat de week om is —
 // of totdat je force:true gebruikt om handmatig te verversen).
-async function getTrendingProducts(section, { size = 24, force = false } = {}) {
+async function getTrendingProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
   const cache = readCache(TRENDING_CACHE_PATH) || {};
   const cached = cache[section];
   if (!force && cached && Date.now() - cached.fetchedAt < TRENDING_TTL_MS) {
@@ -116,58 +116,69 @@ async function getTrendingProducts(section, { size = 24, force = false } = {}) {
     return [];
   }
 
-  // CJ levert voor een flink deel van de producten geen sellPrice mee in dit
-  // overzicht (schijnt normaal te zijn voor bepaalde producttypes bij hen).
-  // We vragen daarom bewust MEER op dan we uiteindelijk tonen, filteren de
-  // prijsloze producten eruit, en houden pas daarna de gewenste `size` over
-  // — zodat de site nooit "Prijs op aanvraag"-rommel laat zien.
-  const fetchSize = Math.min(size * 3, 100); // 100 = CJ's maximum per pagina
-
   const accessToken = await getValidAccessToken();
-  const { data } = await axios.get(`${CJ_BASE}/product/listV2`, {
-    headers: { "CJ-Access-Token": accessToken },
-    params: {
-      page: 1,
-      size: fetchSize,
-      lv3categoryList: categoryIds.slice(0, 50), // CJ limiteert de lijstlengte in de praktijk
-      productFlag: 0, // 0 = Trending products (CJ's eigen big-data signaal)
-      orderBy: 1, // sorteer op listing count = populariteit-proxy
-      sort: "desc",
-      verifiedWarehouse: 1, // alleen geverifieerde voorraad, dus betrouwbaar leverbaar
-      startWarehouseInventory: 10, // niet bijna-uitverkocht tonen
-      features: ["enable_category"],
-    },
-    paramsSerializer: { indexes: null }, // arrays als herhaalde query-params, zoals CJ verwacht
-  });
 
-  if (!data.result) throw new Error(`Trending producten ophalen mislukt: ${data.message}`);
+  // CJ levert voor een flink deel van de producten geen sellPrice mee
+  // (schijnt normaal te zijn voor bepaalde producttypes bij hen). We halen
+  // daarom desnoods meerdere pagina's op — elke pagina op CJ's maximum van
+  // 100 — totdat we genoeg producten MET geldige prijs hebben verzameld,
+  // met een bovengrens (maxPages) zodat we niet oneindig doorzoeken als een
+  // categorie structureel weinig geprijsde producten heeft.
+  const seenPids = new Set();
+  const collected = [];
+  let page = 1;
 
-  const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
+  while (collected.length < size && page <= maxPages) {
+    const { data } = await axios.get(`${CJ_BASE}/product/listV2`, {
+      headers: { "CJ-Access-Token": accessToken },
+      params: {
+        page,
+        size: 100, // CJ's maximum per pagina
+        lv3categoryList: categoryIds.slice(0, 50), // CJ limiteert de lijstlengte in de praktijk
+        productFlag: 0, // 0 = Trending products (CJ's eigen big-data signaal)
+        orderBy: 1, // sorteer op listing count = populariteit-proxy
+        sort: "desc",
+        verifiedWarehouse: 1, // alleen geverifieerde voorraad, dus betrouwbaar leverbaar
+        startWarehouseInventory: 10, // niet bijna-uitverkocht tonen
+        features: ["enable_category"],
+      },
+      paramsSerializer: { indexes: null }, // arrays als herhaalde query-params, zoals CJ verwacht
+    });
 
-  const allProducts = rawProducts.map((p) => {
-    // Niet elk product heeft een gevulde sellPrice (bv. sommige combinatie-
-    // of nog-niet-volledig-ingerichte producten bij CJ) — val dan terug op
-    // de andere prijsvelden die CJ soms wel invult.
-    const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
-    return {
-      pid: p.id,
-      name: p.nameEn,
-      image: p.bigImage,
-      priceFrom: rawPrice !== null ? applyMarkup(rawPrice) : null,
-      cjPriceFrom: rawPrice,
-      listedNum: p.listedNum,
-      category: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName || "",
-      freeShipping: p.addMarkStatus === 1,
-    };
-  });
+    if (!data.result) throw new Error(`Trending producten ophalen mislukt: ${data.message}`);
 
-  // Alleen producten met een echte prijs tonen we op de site — de rest
-  // negeren we gewoon, in plaats van "Prijs op aanvraag" te tonen.
-  const products = allProducts.filter((p) => p.priceFrom !== null).slice(0, size);
+    const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
+    if (rawProducts.length === 0) break; // geen resultaten meer op verdere pagina's
+
+    for (const p of rawProducts) {
+      if (seenPids.has(p.id)) continue; // voorkom dubbele producten tussen pagina's
+      seenPids.add(p.id);
+
+      // Niet elk product heeft een gevulde sellPrice — val dan terug op de
+      // andere prijsvelden die CJ soms wel invult.
+      const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
+      if (rawPrice === null) continue; // alleen producten MET geldige prijs bewaren we
+
+      collected.push({
+        pid: p.id,
+        name: p.nameEn,
+        image: p.bigImage,
+        priceFrom: applyMarkup(rawPrice),
+        cjPriceFrom: rawPrice,
+        listedNum: p.listedNum,
+        category: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName || "",
+        freeShipping: p.addMarkStatus === 1,
+      });
+    }
+
+    page++;
+  }
+
+  const products = collected.slice(0, size);
 
   if (products.length < size) {
     console.warn(
-      `Sectie "${section}": maar ${products.length}/${size} producten hadden een geldige prijs (van ${allProducts.length} opgehaald).`
+      `Sectie "${section}": maar ${products.length}/${size} producten met geldige prijs gevonden (na ${page - 1} pagina('s) bij CJ doorzocht).`
     );
   }
 

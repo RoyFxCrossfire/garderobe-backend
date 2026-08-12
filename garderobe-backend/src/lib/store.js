@@ -30,7 +30,7 @@ function createOrder({ items, shipping, email, totalAmount }) {
     shipping,
     email,
     totalAmount,
-    molliePaymentId: null,
+    stripeSessionId: null,
     cjOrderId: null,
     trackNumber: null,
     trackingProvider: null,
@@ -46,9 +46,9 @@ function getOrder(id) {
   return orders[id] || null;
 }
 
-function findByMolliePaymentId(paymentId) {
+function findByStripeSessionId(sessionId) {
   const orders = readAll();
-  return Object.values(orders).find((o) => o.molliePaymentId === paymentId) || null;
+  return Object.values(orders).find((o) => o.stripeSessionId === sessionId) || null;
 }
 
 function findByCjOrderId(cjOrderId) {
@@ -67,7 +67,7 @@ function updateOrder(id, patch) {
 module.exports = {
   createOrder,
   getOrder,
-  findByMolliePaymentId,
+  findByStripeSessionId,
   findByCjOrderId,
   updateOrder,
 };

@@ -1,24 +1,22 @@
 const express = require("express");
 const store = require("../lib/store");
-const mollie = require("../lib/mollie");
+const { createCheckoutSession } = require("../lib/stripe");
 
 const router = express.Router();
 
 // POST /api/checkout
-// body: {
-//   items: [{ productId, name, price, qty, cjVid }],
-//   shipping: { name, address1, address2, city, province, postalCode, country, countryCode, phone, houseNumber },
-//   email
-// }
+// body: { items: [{ productId, name, price, qty, cjVid }], email? }
+//
+// Let op: we vragen hier GEEN verzendadres meer op — Stripe Checkout doet
+// dat zelf tijdens het betalen (nodig voor Stripe Tax om het juiste
+// btw-tarief te bepalen). Het adres komt pas binnen via de webhook nadat
+// de klant heeft betaald; zie routes/webhookStripe.js.
 router.post("/checkout", async (req, res) => {
   try {
-    const { items, shipping, email } = req.body;
+    const { items, email } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Winkelmandje is leeg." });
-    }
-    if (!shipping || !shipping.countryCode || !shipping.address1) {
-      return res.status(400).json({ error: "Verzendgegevens ontbreken of zijn onvolledig." });
     }
     for (const item of items) {
       if (!item.cjVid) {
@@ -30,20 +28,19 @@ router.post("/checkout", async (req, res) => {
 
     const totalAmount = items.reduce((sum, i) => sum + i.price * i.qty, 0);
 
-    const order = store.createOrder({ items, shipping, email, totalAmount });
+    const order = store.createOrder({ items, shipping: null, email, totalAmount });
 
-    const payment = await mollie.createPayment({
+    const session = await createCheckoutSession({
       orderId: order.id,
-      amount: totalAmount,
-      description: `Garderobe bestelling ${order.id.slice(0, 8)}`,
+      items,
       email,
     });
 
-    store.updateOrder(order.id, { molliePaymentId: payment.id });
+    store.updateOrder(order.id, { stripeSessionId: session.id });
 
     res.json({
       orderId: order.id,
-      checkoutUrl: payment.getCheckoutUrl(),
+      checkoutUrl: session.url,
     });
   } catch (err) {
     console.error("Checkout error:", err);
@@ -51,7 +48,7 @@ router.post("/checkout", async (req, res) => {
   }
 });
 
-// GET /api/orders/:id  — voor de frontend om orderstatus te tonen na terugkeer van Mollie
+// GET /api/orders/:id  — voor de frontend om orderstatus te tonen na terugkeer van Stripe
 router.get("/orders/:id", (req, res) => {
   const order = store.getOrder(req.params.id);
   if (!order) return res.status(404).json({ error: "Order niet gevonden." });

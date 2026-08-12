@@ -1,76 +1,95 @@
 const express = require("express");
-const { getTrendingProducts, getNewProducts, getProductVariants } = require("../lib/cjCatalog");
+const {
+  getTaxonomy,
+  getGenderProducts,
+  getGroupProducts,
+  getNewProducts,
+  getProductVariants,
+} = require("../lib/cjCatalog");
 
 const router = express.Router();
 
-const VALID_SECTIONS = ["dames", "heren", "accessoires"];
+const VALID_SECTIONS = ["dames", "heren"];
 
-// GET /api/catalog?section=dames&force=true
-// Geeft de automatisch-trending producten voor die sectie terug (gecachet
-// voor een week). `force=true` negeert de cache en haalt direct verse data
-// op bij CJ — handig na een wijziging in de categorie-matching, zonder dat
-// je een hele week hoeft te wachten. Beveiligd met een simpele sleutel
-// zodat niet iedereen zomaar jouw CJ-quotum kan opsouperen door dit
-// herhaaldelijk aan te roepen.
+function checkForceKey(req, res) {
+  const wantsForce = req.query.force === "true";
+  if (wantsForce && req.query.key !== process.env.ADMIN_REFRESH_KEY) {
+    res.status(403).json({ error: "Invalid or missing key for force-refresh." });
+    return null;
+  }
+  return wantsForce;
+}
+
+// GET /api/taxonomy?section=dames
+// Returns the sub-category group labels for a section (e.g. "Tops & Sets",
+// "Bottoms", "Accessories"), so the frontend can render tabs without us
+// hardcoding the list in two places.
+router.get("/taxonomy", (req, res) => {
+  const section = req.query.section;
+  if (!VALID_SECTIONS.includes(section)) {
+    return res.status(400).json({ error: `section must be one of ${VALID_SECTIONS.join(", ")}` });
+  }
+  const taxonomy = getTaxonomy(section);
+  res.json({ section, groups: taxonomy ? Object.keys(taxonomy) : [] });
+});
+
+// GET /api/catalog?section=dames&group=Bottoms&force=true
+// Without `group`: the whole gender's catalog, sorted by popularity.
+// With `group`: only that sub-category (matches the taxonomy doc).
 router.get("/catalog", async (req, res) => {
   try {
     const section = req.query.section;
     if (!VALID_SECTIONS.includes(section)) {
-      return res.status(400).json({ error: `section moet één van ${VALID_SECTIONS.join(", ")} zijn` });
+      return res.status(400).json({ error: `section must be one of ${VALID_SECTIONS.join(", ")}` });
     }
 
-    const wantsForce = req.query.force === "true";
-    if (wantsForce && req.query.key !== process.env.ADMIN_REFRESH_KEY) {
-      return res.status(403).json({ error: "Ongeldige of ontbrekende key voor force-refresh." });
-    }
+    const wantsForce = checkForceKey(req, res);
+    if (wantsForce === null) return; // response already sent
 
-    const products = await getTrendingProducts(section, { force: wantsForce });
-    res.json({ section, products });
+    const products = req.query.group
+      ? await getGroupProducts(section, req.query.group, { force: wantsForce })
+      : await getGenderProducts(section, { force: wantsForce });
+
+    res.json({ section, group: req.query.group || null, products });
   } catch (err) {
     console.error("Catalog error:", err);
-    res.status(500).json({ error: "Kon productcatalogus niet ophalen." });
+    res.status(500).json({ error: "Could not load the product catalog." });
   }
 });
 
 // GET /api/catalog/new?force=true
-// Homepage-feed: "nieuw binnen" producten (CJ's productFlag=1), gemixt uit
-// alle drie de secties. Let op: deze route staat BOVEN /catalog/:pid zodat
-// Express "new" niet per ongeluk als een :pid-waarde interpreteert.
+// Homepage feed: "new arrivals" (CJ's productFlag=1), mixed from both
+// genders. Placed ABOVE /catalog/:pid so Express doesn't treat "new" as a
+// :pid value.
 router.get("/catalog/new", async (req, res) => {
   try {
-    const wantsForce = req.query.force === "true";
-    if (wantsForce && req.query.key !== process.env.ADMIN_REFRESH_KEY) {
-      return res.status(403).json({ error: "Ongeldige of ontbrekende key voor force-refresh." });
-    }
+    const wantsForce = checkForceKey(req, res);
+    if (wantsForce === null) return;
 
-    // Na elkaar opvragen i.p.v. Promise.all — CJ staat maar 1 aanvraag per
-    // seconde toe op sommige endpoints, dus alle secties tegelijk bevragen
-    // kan een 429 (Too Many Requests) veroorzaken.
+    // Sequential, not parallel — CJ rate-limits some endpoints to 1
+    // request/second, so fetching both genders at once can trigger 429s.
     const perSection = [];
     for (const section of VALID_SECTIONS) {
       const products = await getNewProducts(section, { size: 8, force: wantsForce });
       perSection.push(products.map((p) => ({ ...p, section })));
     }
 
-    // Mix de secties door elkaar i.p.v. ze achter elkaar te plakken, en
-    // sorteer op populariteit zodat de beste "nieuw"-producten bovenaan staan.
     const products = perSection.flat().sort((a, b) => (b.listedNum || 0) - (a.listedNum || 0));
-
     res.json({ products });
   } catch (err) {
     console.error("New arrivals error:", err);
-    res.status(500).json({ error: "Kon nieuwe producten niet ophalen." });
+    res.status(500).json({ error: "Could not load new arrivals." });
   }
 });
 
-// GET /api/catalog/:pid  — details + varianten (nodig om cjVid te krijgen voor checkout)
+// GET /api/catalog/:pid — details + variants (needed to get the cjVid for checkout)
 router.get("/catalog/:pid", async (req, res) => {
   try {
     const product = await getProductVariants(req.params.pid);
     res.json(product);
   } catch (err) {
     console.error("Product detail error:", err);
-    res.status(500).json({ error: "Kon productdetails niet ophalen." });
+    res.status(500).json({ error: "Could not load product details." });
   }
 });
 

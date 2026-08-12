@@ -1,10 +1,7 @@
-// Haalt automatisch trending producten op bij CJ, per sectie (dames/heren/
-// accessoires) — geen handmatige curatie nodig. Twee lagen caching zodat we
-// niet bij elke paginabezoeker CJ live bevragen, en zodat getoonde producten
-// een week de tijd krijgen om te bewijzen of ze aanslaan bij klanten voordat
-// de lijst ververst:
+// Haalt producten op bij CJ Dropshipping — trending/nieuw/sub-categorie
+// feeds — met caching zodat we niet bij elke bezoeker CJ live bevragen.
 //   1. Categorieboom  -> ververst elke 7 dagen (verandert zelden)
-//   2. Trending lijst per sectie -> ververst elke 7 dagen
+//   2. Productlijsten -> ververst elke week (of eerder via force=true)
 
 const fs = require("fs");
 const path = require("path");
@@ -13,35 +10,102 @@ const { getValidAccessToken } = require("./cjClient");
 
 const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
 const CATEGORY_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-category-cache.json");
-const TRENDING_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-trending-cache.json");
+const PRODUCTS_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-products-cache.json");
 
-const CATEGORY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dagen
-const TRENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week — geef producten tijd om te presteren voordat de lijst ververst
+const CATEGORY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const PRODUCTS_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 
 const MARKUP = Number(process.env.PRICE_MARKUP_MULTIPLIER || 1.6);
 
-// Zoekwoorden om CJ's categorieboom te matchen aan onze drie secties.
-// CJ's categorie-ID's zijn ondoorzichtige GUID's die kunnen verschillen,
-// dus matchen we op naam i.p.v. hardcoded ID's.
+// Keywords to match CJ's category tree onto our two genders. CJ's
+// category ID's are opaque GUIDs that can differ, so we match on name.
 //
-// Belangrijk: dames/heren sluiten expliciet alles uit dat ook op de
-// accessoire-zoekwoorden matcht. Zonder die uitsluiting zou bv. een CJ-
-// categorie als "Men's Accessories" zowel bij heren (bevat "Men") als bij
-// accessoires (bevat "Accessories") terechtkomen, waardoor de herenlijst
-// overspoeld raakt met riemen/horloges/sieraden i.p.v. kleding.
+// Important: gender matchers explicitly exclude anything that also matches
+// the accessory keywords. Without that exclusion, a CJ category like
+// "Men's Accessories" would match BOTH "heren" (contains "Men") and
+// "accessories" (contains "Accessories"), flooding the men's clothing
+// list with belts/watches/jewelry instead of actual clothing.
 const ACCESSORY_KEYWORDS = /access|jewelry|jewellery|bag|belt|sunglasses|watch|hat|scarf|wallet/i;
 
-const SECTION_MATCHERS = {
+const GENDER_MATCHERS = {
   dames: (oneCategoryName, twoCategoryName) =>
-    /women/i.test(oneCategoryName) &&
-    !ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
+    /women/i.test(oneCategoryName) && !ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
   heren: (oneCategoryName, twoCategoryName) =>
     /men/i.test(oneCategoryName) &&
     !/women/i.test(oneCategoryName) &&
     !ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
-  accessoires: (oneCategoryName, twoCategoryName) =>
-    ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
 };
+
+// Sub-category taxonomy per gender, straight from the site's spec doc.
+// Each group label (e.g. "Tops & Sets") maps to a list of CJ level-3
+// category names we search for within that gender's branch of the tree.
+const TAXONOMY = {
+  dames: {
+    "Tops & Sets": [
+      "Ladies Short Sleeve",
+      "Women's Camis",
+      "Women's Vests",
+      "Women's Short-Sleeved Shirts",
+      "Women's Long-Sleeved Shirts",
+      "Blouses & Shirts",
+      "Women's Hoodies & Sweatshirts",
+      "Jumpsuits",
+      "Rompers",
+      "Lady Dresses",
+      "Sweaters",
+      "Suits & Sets",
+    ],
+    Bottoms: ["Leggings", "Skirts", "Woman Jeans", "Woman Shorts", "Pants & Capris", "Wide Leg Pants"],
+    "Outerwear & Jackets": [
+      "Blazers",
+      "Wool & Blend",
+      "Women's Padded Jackets",
+      "Woman Trench",
+      "Basic Jacket",
+      "Leather & Suede",
+      "Real Fur",
+    ],
+    Accessories: [
+      "Scarves & Wraps",
+      "Face mask",
+      "Belts & Cummerbunds",
+      "Woman Gloves & Mittens",
+      "Woman Socks",
+      "Woman Hats & Caps",
+    ],
+  },
+  heren: {
+    "T-Shirts": ["Geometric", "Men's Long-Sleeved", "Striped", "Solid", "3D", "Print"],
+    Bottoms: ["Pajama Sets", "Man Shorts", "Cargo Pants", "Man Jeans", "Harem Pants", "Casual Pants", "Sweatpants"],
+    "Outerwear & Jackets": [
+      "Suits & Blazer",
+      "Men's Sweaters",
+      "Genuine Leather",
+      "Man Trench",
+      "Men's Shirts",
+      "Men's Jackets",
+      "Men's Suits",
+      "Man Hoodies & Sweatshirts",
+      "Wool & Blends",
+      "Parkas",
+      "Down Jackets",
+    ],
+    "Underwear & Loungewear": [
+      "Men's Sleep & Lounge",
+      "Shorts",
+      "Briefs",
+      "Robes",
+      "Man Pajamas Sets",
+      "Boxers",
+      "Long Johns",
+    ],
+    Accessories: ["Socks", "Men's Ties", "Scarves", "Man Gloves & Mittens", "Skullies & Beanies", "Belts"],
+  },
+};
+
+function getTaxonomy(section) {
+  return TAXONOMY[section] || null;
+}
 
 function readCache(cachePath) {
   if (!fs.existsSync(cachePath)) return null;
@@ -63,25 +127,48 @@ async function getCategoryTree() {
   const { data } = await axios.get(`${CJ_BASE}/product/getCategory`, {
     headers: { "CJ-Access-Token": accessToken },
   });
-  if (!data.result) throw new Error(`Categorieboom ophalen mislukt: ${data.message}`);
+  if (!data.result) throw new Error(`Failed to fetch category tree: ${data.message}`);
 
   writeCache(CATEGORY_CACHE_PATH, { fetchedAt: Date.now(), tree: data.data });
   return data.data;
 }
 
-// Vertaalt een sectie ("dames"/"heren"/"accessoires") naar een lijst van
-// CJ level-3 categoryId's die daaronder vallen.
-async function resolveCategoryIds(section) {
+// All level-3 category ID's under a gender's branch of the tree.
+async function resolveGenderCategoryIds(section) {
   const tree = await getCategoryTree();
-  const matcher = SECTION_MATCHERS[section];
-  if (!matcher) throw new Error(`Onbekende sectie: ${section}`);
+  const matcher = GENDER_MATCHERS[section];
+  if (!matcher) throw new Error(`Unknown section: ${section}`);
 
   const ids = [];
   for (const lvl1 of tree) {
     for (const lvl2 of lvl1.categoryFirstList || []) {
-      const match = matcher(lvl1.categoryFirstName, lvl2.categorySecondName);
-      if (match) {
-        for (const lvl3 of lvl2.categorySecondList || []) {
+      if (!matcher(lvl1.categoryFirstName, lvl2.categorySecondName)) continue;
+      for (const lvl3 of lvl2.categorySecondList || []) {
+        ids.push(lvl3.categoryId);
+      }
+    }
+  }
+  return ids;
+}
+
+// Level-3 category ID's within a gender's branch whose name matches one of
+// the leaf names for a taxonomy group (e.g. "Bottoms" -> Leggings, Skirts...).
+async function resolveGroupCategoryIds(section, groupLabel) {
+  const taxonomy = getTaxonomy(section);
+  const leafNames = taxonomy?.[groupLabel];
+  if (!leafNames) return [];
+
+  const lowerLeaves = leafNames.map((n) => n.toLowerCase());
+  const tree = await getCategoryTree();
+  const matcher = GENDER_MATCHERS[section];
+
+  const ids = [];
+  for (const lvl1 of tree) {
+    for (const lvl2 of lvl1.categoryFirstList || []) {
+      if (!matcher(lvl1.categoryFirstName, lvl2.categorySecondName)) continue;
+      for (const lvl3 of lvl2.categorySecondList || []) {
+        const name = (lvl3.categoryName || "").toLowerCase();
+        if (lowerLeaves.some((leaf) => name.includes(leaf) || leaf.includes(name))) {
           ids.push(lvl3.categoryId);
         }
       }
@@ -100,32 +187,24 @@ function applyMarkup(cjPrice) {
   return Math.round(price * 100) / 100;
 }
 
-// Haalt de producten voor één sectie op bij CJ, gefilterd op een
-// productFlag (0 = trending, 1 = nieuw), met wekelijkse caching per
-// namespace+sectie zodat een eenmaal getoond product blijft staan totdat
-// de week om is — of totdat je force:true gebruikt om handmatig te
-// verversen.
-async function fetchProductsByFlag(section, productFlag, { size, force, maxPages, cacheNamespace }) {
-  const cacheKey = `${cacheNamespace}:${section}`;
-  const cache = readCache(TRENDING_CACHE_PATH) || {};
+// Core fetch: given a fixed list of CJ level-3 category ID's, page through
+// CJ's product list (up to `maxPages`, 100 per page — CJ's max) until we've
+// collected `size` products that actually have a valid price. A lot of CJ
+// products don't have a populated sellPrice, so we simply skip those.
+async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, force, maxPages, cacheKey }) {
+  const cache = readCache(PRODUCTS_CACHE_PATH) || {};
   const cached = cache[cacheKey];
-  if (!force && cached && Date.now() - cached.fetchedAt < TRENDING_TTL_MS) {
+  if (!force && cached && Date.now() - cached.fetchedAt < PRODUCTS_TTL_MS) {
     return cached.products;
   }
 
-  const categoryIds = await resolveCategoryIds(section);
   if (categoryIds.length === 0) {
-    console.warn(`No CJ categories found for section "${section}"`);
+    console.warn(`No CJ categories resolved for cache key "${cacheKey}"`);
     return [];
   }
 
   const accessToken = await getValidAccessToken();
 
-  // CJ doesn't populate sellPrice for a large chunk of products (seems to
-  // be normal for certain product types on their end). We therefore fetch
-  // extra pages — each at CJ's maximum of 100 — until we've collected
-  // enough priced products, with an upper bound (maxPages) so we don't
-  // search forever if a category structurally has few priced products.
   const seenPids = new Set();
   const collected = [];
   let page = 1;
@@ -135,31 +214,29 @@ async function fetchProductsByFlag(section, productFlag, { size, force, maxPages
       headers: { "CJ-Access-Token": accessToken },
       params: {
         page,
-        size: 100, // CJ's max per page
+        size: 100,
         lv3categoryList: categoryIds.slice(0, 50), // CJ limits list length in practice
         ...(productFlag != null ? { productFlag } : {}), // 0 = trending, 1 = new, omitted = whole category
-        orderBy: 1, // sort by listing count = popularity proxy
+        orderBy: 1,
         sort: "desc",
-        verifiedWarehouse: 1, // only verified stock, so reliably fulfillable
-        startWarehouseInventory: 10, // avoid near-out-of-stock items
+        verifiedWarehouse: 1,
+        startWarehouseInventory: 10,
         features: ["enable_category"],
       },
-      paramsSerializer: { indexes: null }, // arrays as repeated query params, as CJ expects
+      paramsSerializer: { indexes: null },
     });
 
     if (!data.result) throw new Error(`Failed to fetch products: ${data.message}`);
 
     const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
-    if (rawProducts.length === 0) break; // no more results on further pages
+    if (rawProducts.length === 0) break;
 
     for (const p of rawProducts) {
-      if (seenPids.has(p.id)) continue; // avoid duplicate products across pages
+      if (seenPids.has(p.id)) continue;
       seenPids.add(p.id);
 
-      // Not every product has a filled-in sellPrice — fall back to the
-      // other price fields CJ sometimes does populate.
       const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
-      if (rawPrice === null) continue; // only keep products WITH a valid price
+      if (rawPrice === null) continue;
 
       collected.push({
         pid: p.id,
@@ -180,48 +257,60 @@ async function fetchProductsByFlag(section, productFlag, { size, force, maxPages
 
   if (products.length < size) {
     console.warn(
-      `Section "${section}" (${cacheNamespace}): only found ${products.length}/${size} priced products (searched ${page - 1} page(s) at CJ).`
+      `"${cacheKey}": only found ${products.length}/${size} priced products (searched ${page - 1} page(s)).`
     );
   }
 
   cache[cacheKey] = { fetchedAt: Date.now(), products };
-  writeCache(TRENDING_CACHE_PATH, cache);
+  writeCache(PRODUCTS_CACHE_PATH, cache);
 
   return products;
 }
 
-// Voor de Women/Men categoriepagina's: CJ's eigen "trending"-vlag
-// (productFlag=0) bleek te weinig producten te bevatten in sommige
-// categorieën (soms maar een handvol). We pakken daarom de hele categorie,
-// gesorteerd op populariteit (orderBy=1), i.p.v. ons te beperken tot wat
-// CJ zelf als "trending" markeert.
-async function getTrendingProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
-  return fetchProductsByFlag(section, null, { size, force, maxPages, cacheNamespace: "trending" });
+// Whole-gender feed (used as the fallback/"all" view on a category page).
+async function getGenderProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
+  const categoryIds = await resolveGenderCategoryIds(section);
+  return fetchProductsForCategoryIds(categoryIds, null, { size, force, maxPages, cacheKey: `gender:${section}` });
 }
 
-// Nieuw-binnen feed voor de homepage — gebruikt CJ's "New products"-signaal
-// (productFlag=1). Blijft bewust smaller/gecureerd, in tegenstelling tot de
-// categoriepagina's hierboven.
+// Sub-category group feed (e.g. section=dames, group="Bottoms").
+async function getGroupProducts(section, groupLabel, { size = 24, force = false, maxPages = 6 } = {}) {
+  const categoryIds = await resolveGroupCategoryIds(section, groupLabel);
+  return fetchProductsForCategoryIds(categoryIds, null, {
+    size,
+    force,
+    maxPages,
+    cacheKey: `group:${section}:${groupLabel}`,
+  });
+}
+
+// Homepage "New arrivals" feed — CJ's own "New products" signal (flag 1).
 async function getNewProducts(section, { size = 12, force = false, maxPages = 6 } = {}) {
-  return fetchProductsByFlag(section, 1, { size, force, maxPages, cacheNamespace: "new" });
+  const categoryIds = await resolveGenderCategoryIds(section);
+  return fetchProductsForCategoryIds(categoryIds, 1, { size, force, maxPages, cacheKey: `new:${section}` });
 }
 
-// Haalt varianten (maat/kleur + het cjVid dat je nodig hebt bij checkout)
-// voor één product op — pas nodig zodra de klant een productpagina opent.
+// Backward-compatible alias (older frontend builds may still call this name).
+async function getTrendingProducts(section, opts) {
+  return getGenderProducts(section, opts);
+}
+
+// Fetches variants (size/color + the cjVid needed at checkout) for one
+// product — only needed once a customer opens a product page.
 async function getProductVariants(pid) {
   const accessToken = await getValidAccessToken();
   const { data } = await axios.get(`${CJ_BASE}/product/query`, {
     headers: { "CJ-Access-Token": accessToken },
     params: { pid },
   });
-  if (!data.result) throw new Error(`Productdetails ophalen mislukt: ${data.message}`);
+  if (!data.result) throw new Error(`Failed to fetch product details: ${data.message}`);
 
   const p = data.data;
   const variants = (p.variants || []).map((v) => {
     const rawPrice = toNumber(v.variantSellPrice) ?? toNumber(v.variantSugSellPrice);
     return {
       vid: v.vid,
-      key: v.variantKey, // bv. "Zwart-M"
+      key: v.variantKey, // e.g. "Black-M"
       image: v.variantImage,
       price: rawPrice !== null ? applyMarkup(rawPrice) : null,
       cjPrice: rawPrice,
@@ -229,7 +318,7 @@ async function getProductVariants(pid) {
   });
 
   if (variants.length === 0) {
-    console.warn(`CJ gaf 0 varianten terug voor product ${pid} — check of dit pid nog bestaat/geldig is.`);
+    console.warn(`CJ returned 0 variants for product ${pid} — check whether this pid is still valid.`);
   }
 
   return {
@@ -241,4 +330,11 @@ async function getProductVariants(pid) {
   };
 }
 
-module.exports = { getTrendingProducts, getNewProducts, getProductVariants };
+module.exports = {
+  getTaxonomy,
+  getGenderProducts,
+  getGroupProducts,
+  getNewProducts,
+  getTrendingProducts,
+  getProductVariants,
+};

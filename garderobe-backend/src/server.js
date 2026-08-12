@@ -1,5 +1,6 @@
 require("dotenv").config();
 const express = require("express");
+const cors = require("cors");
 const checkoutRoutes = require("./routes/checkout");
 const webhookStripeRoutes = require("./routes/webhookStripe");
 const webhookCjRoutes = require("./routes/webhookCj");
@@ -7,6 +8,17 @@ const catalogRoutes = require("./routes/catalog");
 const invoiceRoutes = require("./routes/invoices");
 
 const app = express();
+
+// CORS: de frontend draait op een ander domein (Vercel) dan deze backend
+// (Railway), dus de browser blokkeert fetch-verzoeken tenzij we expliciet
+// toestemming geven via deze header. Zet ALLOWED_ORIGIN in .env op je
+// frontend-URL; zonder die variabele staat dit open voor elk domein, wat
+// prima is om te testen maar niet iets om in productie zo te laten staan.
+app.use(
+  cors({
+    origin: process.env.ALLOWED_ORIGIN || "*",
+  })
+);
 
 // BELANGRIJK: de Stripe-webhook heeft de RAUWE request body nodig om de
 // handtekening te verifiëren (constructWebhookEvent in lib/stripe.js).

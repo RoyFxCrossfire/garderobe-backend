@@ -116,12 +116,19 @@ async function getTrendingProducts(section, { size = 24, force = false } = {}) {
     return [];
   }
 
+  // CJ levert voor een flink deel van de producten geen sellPrice mee in dit
+  // overzicht (schijnt normaal te zijn voor bepaalde producttypes bij hen).
+  // We vragen daarom bewust MEER op dan we uiteindelijk tonen, filteren de
+  // prijsloze producten eruit, en houden pas daarna de gewenste `size` over
+  // — zodat de site nooit "Prijs op aanvraag"-rommel laat zien.
+  const fetchSize = Math.min(size * 3, 100); // 100 = CJ's maximum per pagina
+
   const accessToken = await getValidAccessToken();
   const { data } = await axios.get(`${CJ_BASE}/product/listV2`, {
     headers: { "CJ-Access-Token": accessToken },
     params: {
       page: 1,
-      size,
+      size: fetchSize,
       lv3categoryList: categoryIds.slice(0, 50), // CJ limiteert de lijstlengte in de praktijk
       productFlag: 0, // 0 = Trending products (CJ's eigen big-data signaal)
       orderBy: 1, // sorteer op listing count = populariteit-proxy
@@ -137,11 +144,10 @@ async function getTrendingProducts(section, { size = 24, force = false } = {}) {
 
   const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
 
-  const products = rawProducts.map((p) => {
+  const allProducts = rawProducts.map((p) => {
     // Niet elk product heeft een gevulde sellPrice (bv. sommige combinatie-
     // of nog-niet-volledig-ingerichte producten bij CJ) — val dan terug op
-    // de andere prijsvelden die CJ soms wel invult, en toon anders liever
-    // "geen prijs" dan een verwarrende "€ NaN".
+    // de andere prijsvelden die CJ soms wel invult.
     const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
     return {
       pid: p.id,
@@ -154,6 +160,16 @@ async function getTrendingProducts(section, { size = 24, force = false } = {}) {
       freeShipping: p.addMarkStatus === 1,
     };
   });
+
+  // Alleen producten met een echte prijs tonen we op de site — de rest
+  // negeren we gewoon, in plaats van "Prijs op aanvraag" te tonen.
+  const products = allProducts.filter((p) => p.priceFrom !== null).slice(0, size);
+
+  if (products.length < size) {
+    console.warn(
+      `Sectie "${section}": maar ${products.length}/${size} producten hadden een geldige prijs (van ${allProducts.length} opgehaald).`
+    );
+  }
 
   cache[section] = { fetchedAt: Date.now(), products };
   writeCache(TRENDING_CACHE_PATH, cache);

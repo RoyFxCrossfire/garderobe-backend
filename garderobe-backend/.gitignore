@@ -1,0 +1,10 @@
+node_modules
+.env
+*.log
+
+# Lokale bestand-opslag (prototype-niveau) — hoort niet in git,
+# bevat straks echte klant/order-data en CJ-tokens
+data/orders.json
+data/cj-tokens.json
+data/cj-category-cache.json
+data/cj-trending-cache.json

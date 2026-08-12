@@ -1,0 +1,170 @@
+// Haalt automatisch trending producten op bij CJ, per sectie (dames/heren/
+// accessoires) — geen handmatige curatie nodig. Twee lagen caching zodat we
+// niet bij elke paginabezoeker CJ live bevragen, en zodat getoonde producten
+// een week de tijd krijgen om te bewijzen of ze aanslaan bij klanten voordat
+// de lijst ververst:
+//   1. Categorieboom  -> ververst elke 7 dagen (verandert zelden)
+//   2. Trending lijst per sectie -> ververst elke 7 dagen
+
+const fs = require("fs");
+const path = require("path");
+const axios = require("axios");
+const { getValidAccessToken } = require("./cjClient");
+
+const CJ_BASE = "https://developers.cjdropshipping.com/api2.0/v1";
+const CATEGORY_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-category-cache.json");
+const TRENDING_CACHE_PATH = path.join(__dirname, "..", "..", "data", "cj-trending-cache.json");
+
+const CATEGORY_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 dagen
+const TRENDING_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week — geef producten tijd om te presteren voordat de lijst ververst
+
+const MARKUP = Number(process.env.PRICE_MARKUP_MULTIPLIER || 1.6);
+
+// Zoekwoorden om CJ's categorieboom te matchen aan onze drie secties.
+// CJ's categorie-ID's zijn ondoorzichtige GUID's die kunnen verschillen,
+// dus matchen we op naam i.p.v. hardcoded ID's.
+const SECTION_MATCHERS = {
+  dames: (oneCategoryName) => /women/i.test(oneCategoryName),
+  heren: (oneCategoryName) => /men/i.test(oneCategoryName) && !/women/i.test(oneCategoryName),
+  accessoires: (oneCategoryName, twoCategoryName) =>
+    /access|jewelry|jewellery|bag|belt|sunglasses|watch|hat|scarf|wallet/i.test(
+      `${oneCategoryName} ${twoCategoryName}`
+    ),
+};
+
+function readCache(cachePath) {
+  if (!fs.existsSync(cachePath)) return null;
+  const raw = fs.readFileSync(cachePath, "utf-8").trim();
+  return raw ? JSON.parse(raw) : null;
+}
+
+function writeCache(cachePath, data) {
+  fs.writeFileSync(cachePath, JSON.stringify(data, null, 2));
+}
+
+async function getCategoryTree() {
+  const cached = readCache(CATEGORY_CACHE_PATH);
+  if (cached && Date.now() - cached.fetchedAt < CATEGORY_TTL_MS) {
+    return cached.tree;
+  }
+
+  const accessToken = await getValidAccessToken();
+  const { data } = await axios.get(`${CJ_BASE}/product/getCategory`, {
+    headers: { "CJ-Access-Token": accessToken },
+  });
+  if (!data.result) throw new Error(`Categorieboom ophalen mislukt: ${data.message}`);
+
+  writeCache(CATEGORY_CACHE_PATH, { fetchedAt: Date.now(), tree: data.data });
+  return data.data;
+}
+
+// Vertaalt een sectie ("dames"/"heren"/"accessoires") naar een lijst van
+// CJ level-3 categoryId's die daaronder vallen.
+async function resolveCategoryIds(section) {
+  const tree = await getCategoryTree();
+  const matcher = SECTION_MATCHERS[section];
+  if (!matcher) throw new Error(`Onbekende sectie: ${section}`);
+
+  const ids = [];
+  for (const lvl1 of tree) {
+    for (const lvl2 of lvl1.categoryFirstList || []) {
+      const match =
+        section === "accessoires"
+          ? matcher(lvl1.categoryFirstName, lvl2.categorySecondName)
+          : matcher(lvl1.categoryFirstName);
+      if (match) {
+        for (const lvl3 of lvl2.categorySecondList || []) {
+          ids.push(lvl3.categoryId);
+        }
+      }
+    }
+  }
+  return ids;
+}
+
+function applyMarkup(cjPrice) {
+  const price = Number(cjPrice) * MARKUP;
+  return Math.round(price * 100) / 100;
+}
+
+// Haalt de trending producten voor één sectie op (met wekelijkse caching,
+// zodat een eenmaal getoond product blijft staan totdat de week om is —
+// of totdat je force:true gebruikt om handmatig te verversen).
+async function getTrendingProducts(section, { size = 24, force = false } = {}) {
+  const cache = readCache(TRENDING_CACHE_PATH) || {};
+  const cached = cache[section];
+  if (!force && cached && Date.now() - cached.fetchedAt < TRENDING_TTL_MS) {
+    return cached.products;
+  }
+
+  const categoryIds = await resolveCategoryIds(section);
+  if (categoryIds.length === 0) {
+    console.warn(`Geen CJ-categorieën gevonden voor sectie "${section}"`);
+    return [];
+  }
+
+  const accessToken = await getValidAccessToken();
+  const { data } = await axios.get(`${CJ_BASE}/product/listV2`, {
+    headers: { "CJ-Access-Token": accessToken },
+    params: {
+      page: 1,
+      size,
+      lv3categoryList: categoryIds.slice(0, 50), // CJ limiteert de lijstlengte in de praktijk
+      productFlag: 0, // 0 = Trending products (CJ's eigen big-data signaal)
+      orderBy: 1, // sorteer op listing count = populariteit-proxy
+      sort: "desc",
+      verifiedWarehouse: 1, // alleen geverifieerde voorraad, dus betrouwbaar leverbaar
+      startWarehouseInventory: 10, // niet bijna-uitverkocht tonen
+      features: ["enable_category"],
+    },
+    paramsSerializer: { indexes: null }, // arrays als herhaalde query-params, zoals CJ verwacht
+  });
+
+  if (!data.result) throw new Error(`Trending producten ophalen mislukt: ${data.message}`);
+
+  const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
+
+  const products = rawProducts.map((p) => ({
+    pid: p.id,
+    name: p.nameEn,
+    image: p.bigImage,
+    priceFrom: applyMarkup(p.sellPrice),
+    cjPriceFrom: Number(p.sellPrice),
+    listedNum: p.listedNum,
+    category: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName || "",
+    freeShipping: p.addMarkStatus === 1,
+  }));
+
+  cache[section] = { fetchedAt: Date.now(), products };
+  writeCache(TRENDING_CACHE_PATH, cache);
+
+  return products;
+}
+
+// Haalt varianten (maat/kleur + het cjVid dat je nodig hebt bij checkout)
+// voor één product op — pas nodig zodra de klant een productpagina opent.
+async function getProductVariants(pid) {
+  const accessToken = await getValidAccessToken();
+  const { data } = await axios.get(`${CJ_BASE}/product/query`, {
+    headers: { "CJ-Access-Token": accessToken },
+    params: { pid },
+  });
+  if (!data.result) throw new Error(`Productdetails ophalen mislukt: ${data.message}`);
+
+  const p = data.data;
+  return {
+    pid: p.pid,
+    name: p.productNameEn,
+    description: p.description,
+    images: p.productImageSet || [p.bigImage],
+    variants: (p.variants || []).map((v) => ({
+      vid: v.vid,
+      key: v.variantKey, // bv. "Zwart-M"
+      image: v.variantImage,
+      price: applyMarkup(v.variantSellPrice),
+      cjPrice: Number(v.variantSellPrice),
+    })),
+  };
+}
+
+module.exports = { getTrendingProducts, getProductVariants };

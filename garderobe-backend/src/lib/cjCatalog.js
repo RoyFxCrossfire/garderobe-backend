@@ -23,13 +23,24 @@ const MARKUP = Number(process.env.PRICE_MARKUP_MULTIPLIER || 1.6);
 // Zoekwoorden om CJ's categorieboom te matchen aan onze drie secties.
 // CJ's categorie-ID's zijn ondoorzichtige GUID's die kunnen verschillen,
 // dus matchen we op naam i.p.v. hardcoded ID's.
+//
+// Belangrijk: dames/heren sluiten expliciet alles uit dat ook op de
+// accessoire-zoekwoorden matcht. Zonder die uitsluiting zou bv. een CJ-
+// categorie als "Men's Accessories" zowel bij heren (bevat "Men") als bij
+// accessoires (bevat "Accessories") terechtkomen, waardoor de herenlijst
+// overspoeld raakt met riemen/horloges/sieraden i.p.v. kleding.
+const ACCESSORY_KEYWORDS = /access|jewelry|jewellery|bag|belt|sunglasses|watch|hat|scarf|wallet/i;
+
 const SECTION_MATCHERS = {
-  dames: (oneCategoryName) => /women/i.test(oneCategoryName),
-  heren: (oneCategoryName) => /men/i.test(oneCategoryName) && !/women/i.test(oneCategoryName),
+  dames: (oneCategoryName, twoCategoryName) =>
+    /women/i.test(oneCategoryName) &&
+    !ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
+  heren: (oneCategoryName, twoCategoryName) =>
+    /men/i.test(oneCategoryName) &&
+    !/women/i.test(oneCategoryName) &&
+    !ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
   accessoires: (oneCategoryName, twoCategoryName) =>
-    /access|jewelry|jewellery|bag|belt|sunglasses|watch|hat|scarf|wallet/i.test(
-      `${oneCategoryName} ${twoCategoryName}`
-    ),
+    ACCESSORY_KEYWORDS.test(`${oneCategoryName} ${twoCategoryName}`),
 };
 
 function readCache(cachePath) {
@@ -68,10 +79,7 @@ async function resolveCategoryIds(section) {
   const ids = [];
   for (const lvl1 of tree) {
     for (const lvl2 of lvl1.categoryFirstList || []) {
-      const match =
-        section === "accessoires"
-          ? matcher(lvl1.categoryFirstName, lvl2.categorySecondName)
-          : matcher(lvl1.categoryFirstName);
+      const match = matcher(lvl1.categoryFirstName, lvl2.categorySecondName);
       if (match) {
         for (const lvl3 of lvl2.categorySecondList || []) {
           ids.push(lvl3.categoryId);
@@ -80,6 +88,11 @@ async function resolveCategoryIds(section) {
     }
   }
   return ids;
+}
+
+function toNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 function applyMarkup(cjPrice) {
@@ -124,16 +137,23 @@ async function getTrendingProducts(section, { size = 24, force = false } = {}) {
 
   const rawProducts = (data.data.content || []).flatMap((c) => c.productList || []);
 
-  const products = rawProducts.map((p) => ({
-    pid: p.id,
-    name: p.nameEn,
-    image: p.bigImage,
-    priceFrom: applyMarkup(p.sellPrice),
-    cjPriceFrom: Number(p.sellPrice),
-    listedNum: p.listedNum,
-    category: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName || "",
-    freeShipping: p.addMarkStatus === 1,
-  }));
+  const products = rawProducts.map((p) => {
+    // Niet elk product heeft een gevulde sellPrice (bv. sommige combinatie-
+    // of nog-niet-volledig-ingerichte producten bij CJ) — val dan terug op
+    // de andere prijsvelden die CJ soms wel invult, en toon anders liever
+    // "geen prijs" dan een verwarrende "€ NaN".
+    const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
+    return {
+      pid: p.id,
+      name: p.nameEn,
+      image: p.bigImage,
+      priceFrom: rawPrice !== null ? applyMarkup(rawPrice) : null,
+      cjPriceFrom: rawPrice,
+      listedNum: p.listedNum,
+      category: p.threeCategoryName || p.twoCategoryName || p.oneCategoryName || "",
+      freeShipping: p.addMarkStatus === 1,
+    };
+  });
 
   cache[section] = { fetchedAt: Date.now(), products };
   writeCache(TRENDING_CACHE_PATH, cache);
@@ -152,18 +172,27 @@ async function getProductVariants(pid) {
   if (!data.result) throw new Error(`Productdetails ophalen mislukt: ${data.message}`);
 
   const p = data.data;
+  const variants = (p.variants || []).map((v) => {
+    const rawPrice = toNumber(v.variantSellPrice) ?? toNumber(v.variantSugSellPrice);
+    return {
+      vid: v.vid,
+      key: v.variantKey, // bv. "Zwart-M"
+      image: v.variantImage,
+      price: rawPrice !== null ? applyMarkup(rawPrice) : null,
+      cjPrice: rawPrice,
+    };
+  });
+
+  if (variants.length === 0) {
+    console.warn(`CJ gaf 0 varianten terug voor product ${pid} — check of dit pid nog bestaat/geldig is.`);
+  }
+
   return {
     pid: p.pid,
     name: p.productNameEn,
     description: p.description,
     images: p.productImageSet || [p.bigImage],
-    variants: (p.variants || []).map((v) => ({
-      vid: v.vid,
-      key: v.variantKey, // bv. "Zwart-M"
-      image: v.variantImage,
-      price: applyMarkup(v.variantSellPrice),
-      cjPrice: Number(v.variantSellPrice),
-    })),
+    variants,
   };
 }
 

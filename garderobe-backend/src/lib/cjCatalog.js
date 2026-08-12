@@ -137,7 +137,7 @@ async function fetchProductsByFlag(section, productFlag, { size, force, maxPages
         page,
         size: 100, // CJ's max per page
         lv3categoryList: categoryIds.slice(0, 50), // CJ limits list length in practice
-        productFlag, // 0 = trending, 1 = new products
+        ...(productFlag != null ? { productFlag } : {}), // 0 = trending, 1 = new, omitted = whole category
         orderBy: 1, // sort by listing count = popularity proxy
         sort: "desc",
         verifiedWarehouse: 1, // only verified stock, so reliably fulfillable
@@ -190,12 +190,18 @@ async function fetchProductsByFlag(section, productFlag, { size, force, maxPages
   return products;
 }
 
+// Voor de Women/Men categoriepagina's: CJ's eigen "trending"-vlag
+// (productFlag=0) bleek te weinig producten te bevatten in sommige
+// categorieën (soms maar een handvol). We pakken daarom de hele categorie,
+// gesorteerd op populariteit (orderBy=1), i.p.v. ons te beperken tot wat
+// CJ zelf als "trending" markeert.
 async function getTrendingProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
-  return fetchProductsByFlag(section, 0, { size, force, maxPages, cacheNamespace: "trending" });
+  return fetchProductsByFlag(section, null, { size, force, maxPages, cacheNamespace: "trending" });
 }
 
 // Nieuw-binnen feed voor de homepage — gebruikt CJ's "New products"-signaal
-// (productFlag=1) in plaats van "Trending" (productFlag=0).
+// (productFlag=1). Blijft bewust smaller/gecureerd, in tegenstelling tot de
+// categoriepagina's hierboven.
 async function getNewProducts(section, { size = 12, force = false, maxPages = 6 } = {}) {
   return fetchProductsByFlag(section, 1, { size, force, maxPages, cacheNamespace: "new" });
 }

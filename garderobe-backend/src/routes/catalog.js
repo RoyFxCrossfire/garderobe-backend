@@ -43,13 +43,14 @@ router.get("/catalog/new", async (req, res) => {
       return res.status(403).json({ error: "Ongeldige of ontbrekende key voor force-refresh." });
     }
 
-    const perSection = await Promise.all(
-      VALID_SECTIONS.map((section) =>
-        getNewProducts(section, { size: 8, force: wantsForce }).then((products) =>
-          products.map((p) => ({ ...p, section }))
-        )
-      )
-    );
+    // Na elkaar opvragen i.p.v. Promise.all — CJ staat maar 1 aanvraag per
+    // seconde toe op sommige endpoints, dus alle secties tegelijk bevragen
+    // kan een 429 (Too Many Requests) veroorzaken.
+    const perSection = [];
+    for (const section of VALID_SECTIONS) {
+      const products = await getNewProducts(section, { size: 8, force: wantsForce });
+      perSection.push(products.map((p) => ({ ...p, section })));
+    }
 
     // Mix de secties door elkaar i.p.v. ze achter elkaar te plakken, en
     // sorteer op populariteit zodat de beste "nieuw"-producten bovenaan staan.

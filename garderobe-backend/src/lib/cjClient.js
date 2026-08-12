@@ -23,8 +23,30 @@ function saveTokens(tokens) {
   fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// CJ staat maar 1 aanvraag per seconde toe op hun authenticatie-endpoints
+// ("QPS limit is 1 time/1second"). Als meerdere delen van onze code
+// tegelijk een token nodig hebben (bv. de "nieuw binnen"-route die alle
+// secties parallel opvraagt), zou elk apart een login-aanvraag doen en
+// elkaars limiet overschrijden. Deze retry-wrapper vangt een 429 op en
+// probeert het na een korte pauze automatisch opnieuw.
+async function postWithRetry(url, body, { retries = 3, delayMs = 1200 } = {}) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await axios.post(url, body);
+    } catch (err) {
+      const isRateLimited = err.response?.status === 429;
+      if (!isRateLimited || attempt === retries) throw err;
+      await sleep(delayMs * attempt); // elke poging iets langer wachten
+    }
+  }
+}
+
 async function fetchNewAccessToken() {
-  const { data } = await axios.post(`${CJ_BASE}/authentication/getAccessToken`, {
+  const { data } = await postWithRetry(`${CJ_BASE}/authentication/getAccessToken`, {
     apiKey: process.env.CJ_API_KEY,
   });
   if (!data.result) throw new Error(`CJ auth mislukt: ${data.message}`);
@@ -33,7 +55,7 @@ async function fetchNewAccessToken() {
 }
 
 async function refreshAccessToken(refreshToken) {
-  const { data } = await axios.post(`${CJ_BASE}/authentication/refreshAccessToken`, {
+  const { data } = await postWithRetry(`${CJ_BASE}/authentication/refreshAccessToken`, {
     refreshToken,
   });
   if (!data.result) {
@@ -44,24 +66,39 @@ async function refreshAccessToken(refreshToken) {
   return data.data;
 }
 
-// Geeft een geldig access token terug, ververst indien nodig.
+// Zorgt dat er nooit twee token-aanvragen tegelijk onderweg zijn: als er al
+// een ophaal-actie loopt, krijgen latere aanroepers dezelfde promise terug
+// in plaats van zelf nog een keer bij CJ aan te kloppen.
+let inFlightTokenFetch = null;
+
 async function getValidAccessToken() {
-  let tokens = loadTokens();
+  if (inFlightTokenFetch) return inFlightTokenFetch;
 
-  if (!tokens) {
-    tokens = await fetchNewAccessToken();
+  const run = async () => {
+    let tokens = loadTokens();
+
+    if (!tokens) {
+      tokens = await fetchNewAccessToken();
+      return tokens.accessToken;
+    }
+
+    const expiry = new Date(tokens.accessTokenExpiryDate).getTime();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+
+    if (Date.now() > expiry - oneDayMs) {
+      // Bijna verlopen (of al verlopen) -> ververs voor we hem gebruiken
+      tokens = await refreshAccessToken(tokens.refreshToken);
+    }
+
     return tokens.accessToken;
+  };
+
+  inFlightTokenFetch = run();
+  try {
+    return await inFlightTokenFetch;
+  } finally {
+    inFlightTokenFetch = null;
   }
-
-  const expiry = new Date(tokens.accessTokenExpiryDate).getTime();
-  const oneDayMs = 24 * 60 * 60 * 1000;
-
-  if (Date.now() > expiry - oneDayMs) {
-    // Bijna verlopen (of al verlopen) -> ververs voor we hem gebruiken
-    tokens = await refreshAccessToken(tokens.refreshToken);
-  }
-
-  return tokens.accessToken;
 }
 
 // Maakt een order aan bij CJ nadat de klant succesvol heeft betaald.

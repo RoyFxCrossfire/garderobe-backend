@@ -33,9 +33,12 @@ router.get("/taxonomy", (req, res) => {
   res.json({ section, groups: taxonomy ? Object.keys(taxonomy) : [] });
 });
 
-// GET /api/catalog?section=dames&group=Bottoms&force=true
+// GET /api/catalog?section=dames&group=Bottoms&offset=0&limit=24&force=true
 // Without `group`: the whole gender's catalog, sorted by popularity.
 // With `group`: only that sub-category (matches the taxonomy doc).
+// offset/limit slice a larger cached pool — used for infinite scroll, so
+// scrolling further doesn't need extra CJ calls, just a slice of what's
+// already cached.
 router.get("/catalog", async (req, res) => {
   try {
     const section = req.query.section;
@@ -46,36 +49,52 @@ router.get("/catalog", async (req, res) => {
     const wantsForce = checkForceKey(req, res);
     if (wantsForce === null) return; // response already sent
 
-    const products = req.query.group
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const limit = Math.min(48, Math.max(1, parseInt(req.query.limit, 10) || 24));
+
+    const allProducts = req.query.group
       ? await getGroupProducts(section, req.query.group, { force: wantsForce })
       : await getGenderProducts(section, { force: wantsForce });
 
-    res.json({ section, group: req.query.group || null, products });
+    const products = allProducts.slice(offset, offset + limit);
+
+    res.json({
+      section,
+      group: req.query.group || null,
+      products,
+      total: allProducts.length,
+      hasMore: offset + limit < allProducts.length,
+    });
   } catch (err) {
     console.error("Catalog error:", err);
     res.status(500).json({ error: "Could not load the product catalog." });
   }
 });
 
-// GET /api/catalog/new?force=true
+// GET /api/catalog/new?offset=0&limit=24&force=true
 // Homepage feed: "new arrivals" (CJ's productFlag=1), mixed from both
-// genders. Placed ABOVE /catalog/:pid so Express doesn't treat "new" as a
-// :pid value.
+// genders, with the same offset/limit slicing for infinite scroll. Placed
+// ABOVE /catalog/:pid so Express doesn't treat "new" as a :pid value.
 router.get("/catalog/new", async (req, res) => {
   try {
     const wantsForce = checkForceKey(req, res);
     if (wantsForce === null) return;
 
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const limit = Math.min(48, Math.max(1, parseInt(req.query.limit, 10) || 24));
+
     // Sequential, not parallel — CJ rate-limits some endpoints to 1
     // request/second, so fetching both genders at once can trigger 429s.
     const perSection = [];
     for (const section of VALID_SECTIONS) {
-      const products = await getNewProducts(section, { size: 8, force: wantsForce });
+      const products = await getNewProducts(section, { force: wantsForce });
       perSection.push(products.map((p) => ({ ...p, section })));
     }
 
-    const products = perSection.flat().sort((a, b) => (b.listedNum || 0) - (a.listedNum || 0));
-    res.json({ products });
+    const allProducts = perSection.flat().sort((a, b) => (b.listedNum || 0) - (a.listedNum || 0));
+    const products = allProducts.slice(offset, offset + limit);
+
+    res.json({ products, total: allProducts.length, hasMore: offset + limit < allProducts.length });
   } catch (err) {
     console.error("New arrivals error:", err);
     res.status(500).json({ error: "Could not load new arrivals." });

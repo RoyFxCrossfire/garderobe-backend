@@ -272,13 +272,15 @@ async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, for
 }
 
 // Whole-gender feed (used as the fallback/"all" view on a category page).
-async function getGenderProducts(section, { size = 24, force = false, maxPages = 6 } = {}) {
+// size is deliberately larger than one screenful — the route slices this
+// cached pool for infinite scroll instead of hitting CJ again per scroll.
+async function getGenderProducts(section, { size = 100, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGenderCategoryIds(section);
   return fetchProductsForCategoryIds(categoryIds, null, { size, force, maxPages, cacheKey: `gender:${section}` });
 }
 
 // Sub-category group feed (e.g. section=dames, group="Bottoms").
-async function getGroupProducts(section, groupLabel, { size = 24, force = false, maxPages = 6 } = {}) {
+async function getGroupProducts(section, groupLabel, { size = 100, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGroupCategoryIds(section, groupLabel);
   return fetchProductsForCategoryIds(categoryIds, null, {
     size,
@@ -289,7 +291,7 @@ async function getGroupProducts(section, groupLabel, { size = 24, force = false,
 }
 
 // Homepage "New arrivals" feed — CJ's own "New products" signal (flag 1).
-async function getNewProducts(section, { size = 12, force = false, maxPages = 6 } = {}) {
+async function getNewProducts(section, { size = 40, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGenderCategoryIds(section);
   return fetchProductsForCategoryIds(categoryIds, 1, { size, force, maxPages, cacheKey: `new:${section}` });
 }

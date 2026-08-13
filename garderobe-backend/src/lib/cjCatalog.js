@@ -103,6 +103,118 @@ const TAXONOMY = {
   },
 };
 
+// Keywords per EXACT leaf item (e.g. "Women's Camis" -> "cami"), used to
+// split an already-fetched group's products into labeled sub-sections that
+// mirror your taxonomy doc one-to-one. Order matches TAXONOMY so sections
+// render in the same order as the doc.
+const LEAF_KEYWORDS = {
+  dames: {
+    "Ladies Short Sleeve": ["short sleeve"],
+    "Women's Camis": ["cami"],
+    "Women's Vests": ["vest"],
+    "Women's Short-Sleeved Shirts": ["short sleeve shirt", "short-sleeve shirt"],
+    "Women's Long-Sleeved Shirts": ["long sleeve shirt", "long-sleeve shirt"],
+    "Blouses & Shirts": ["blouse", "shirt"],
+    "Women's Hoodies & Sweatshirts": ["hoodie", "sweatshirt"],
+    Jumpsuits: ["jumpsuit"],
+    Rompers: ["romper"],
+    "Lady Dresses": ["dress"],
+    Sweaters: ["sweater", "pullover", "knit"],
+    "Suits & Sets": ["suit set", "2 piece", "two piece", "piece set"],
+    Leggings: ["legging"],
+    Skirts: ["skirt"],
+    "Woman Jeans": ["jean"],
+    "Woman Shorts": ["short"],
+    "Pants & Capris": ["pant", "capri", "trouser"],
+    "Wide Leg Pants": ["wide leg"],
+    Blazers: ["blazer"],
+    "Wool & Blend": ["wool"],
+    "Women's Padded Jackets": ["padded jacket", "puffer"],
+    "Woman Trench": ["trench"],
+    "Basic Jacket": ["jacket"],
+    "Leather & Suede": ["leather", "suede"],
+    "Real Fur": ["fur"],
+    "Scarves & Wraps": ["scarf", "wrap"],
+    "Face mask": ["mask"],
+    "Belts & Cummerbunds": ["belt", "cummerbund"],
+    "Woman Gloves & Mittens": ["glove", "mitten"],
+    "Woman Socks": ["sock"],
+    "Woman Hats & Caps": ["hat", "cap"],
+  },
+  heren: {
+    Geometric: ["geometric"],
+    "Men's Long-Sleeved": ["long sleeve", "long-sleeve"],
+    Striped: ["stripe"],
+    Solid: ["solid"],
+    "3D": ["3d"],
+    Print: ["print"],
+    "Pajama Sets": ["pajama set", "pyjama set"],
+    "Man Shorts": ["short"],
+    "Cargo Pants": ["cargo"],
+    "Man Jeans": ["jean"],
+    "Harem Pants": ["harem"],
+    "Casual Pants": ["casual pant", "trouser"],
+    Sweatpants: ["sweatpant", "jogger"],
+    "Suits & Blazer": ["suit", "blazer"],
+    "Men's Sweaters": ["sweater", "pullover", "knit"],
+    "Genuine Leather": ["leather"],
+    "Man Trench": ["trench"],
+    "Men's Shirts": ["shirt"],
+    "Men's Jackets": ["jacket"],
+    "Men's Suits": ["suit"],
+    "Man Hoodies & Sweatshirts": ["hoodie", "sweatshirt"],
+    "Wool & Blends": ["wool"],
+    Parkas: ["parka"],
+    "Down Jackets": ["down jacket", "puffer"],
+    "Men's Sleep & Lounge": ["sleep", "lounge"],
+    Shorts: ["short"],
+    Briefs: ["brief"],
+    Robes: ["robe"],
+    "Man Pajamas Sets": ["pajama", "pyjama"],
+    Boxers: ["boxer"],
+    "Long Johns": ["long john"],
+    Socks: ["sock"],
+    "Men's Ties": ["tie"],
+    Scarves: ["scarf"],
+    "Man Gloves & Mittens": ["glove", "mitten"],
+    "Skullies & Beanies": ["beanie", "skull"],
+    Belts: ["belt"],
+  },
+};
+
+// Splits an already-fetched group's product pool into one bucket per exact
+// taxonomy leaf (e.g. "Women's Camis", "Jumpsuits", ...), based on the
+// product name. Each product goes into the FIRST leaf it matches so it
+// only shows up once. Anything that matched the group but no specific leaf
+// falls into an "Other" bucket at the end. Empty leaves are omitted.
+function bucketProductsByLeaf(section, groupLabel, products) {
+  const leafNames = TAXONOMY[section]?.[groupLabel] || [];
+  const buckets = leafNames.map((name) => ({ name, products: [] }));
+  const other = [];
+  const usedPids = new Set();
+
+  for (const product of products) {
+    if (usedPids.has(product.pid)) continue;
+    const lowerName = (product.name || "").toLowerCase();
+
+    const bucket = buckets.find((b) => {
+      const keywords = LEAF_KEYWORDS[section]?.[b.name];
+      return keywords && keywords.some((k) => lowerName.includes(k));
+    });
+
+    if (bucket) {
+      bucket.products.push(product);
+    } else {
+      other.push(product);
+    }
+    usedPids.add(product.pid);
+  }
+
+  const nonEmpty = buckets.filter((b) => b.products.length > 0);
+  if (other.length > 0) nonEmpty.push({ name: "Other", products: other });
+  return nonEmpty;
+}
+
 // CJ's own category assignment isn't always accurate — a garden tool can
 // end up filed under a clothing category on their end. As a safety net, we
 // ALSO check the actual product name for clothing-relevant keywords, and
@@ -347,6 +459,14 @@ async function getGroupProducts(section, groupLabel, { size = 100, force = false
   });
 }
 
+// Same as getGroupProducts, but pre-sorted into one bucket per exact
+// taxonomy leaf (e.g. "Women's Camis", "Jumpsuits") so the page can show
+// them as separate labeled sections, matching your spec doc.
+async function getGroupProductsByLeaf(section, groupLabel, opts = {}) {
+  const products = await getGroupProducts(section, groupLabel, opts);
+  return bucketProductsByLeaf(section, groupLabel, products);
+}
+
 // Homepage "New arrivals" feed — CJ's own "New products" signal (flag 1).
 async function getNewProducts(section, { size = 40, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGenderCategoryIds(section);
@@ -405,6 +525,7 @@ module.exports = {
   getTaxonomy,
   getGenderProducts,
   getGroupProducts,
+  getGroupProductsByLeaf,
   getNewProducts,
   getTrendingProducts,
   getProductVariants,

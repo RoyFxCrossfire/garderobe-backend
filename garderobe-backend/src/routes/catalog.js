@@ -3,6 +3,7 @@ const {
   getTaxonomy,
   getGenderProducts,
   getGroupProducts,
+  getGroupProductsByLeaf,
   getNewProducts,
   getProductVariants,
 } = require("../lib/cjCatalog");
@@ -68,6 +69,32 @@ router.get("/catalog", async (req, res) => {
   } catch (err) {
     console.error("Catalog error:", err);
     res.status(500).json({ error: "Could not load the product catalog." });
+  }
+});
+
+// GET /api/catalog/leaves?section=dames&group=Tops%20%26%20Sets&force=true
+// Returns the group's products pre-sorted into one labeled section per
+// exact taxonomy leaf (e.g. "Women's Camis", "Jumpsuits", "Lady Dresses"),
+// matching your spec doc's structure instead of one mixed grid.
+router.get("/catalog/leaves", async (req, res) => {
+  try {
+    const section = req.query.section;
+    const group = req.query.group;
+    if (!VALID_SECTIONS.includes(section)) {
+      return res.status(400).json({ error: `section must be one of ${VALID_SECTIONS.join(", ")}` });
+    }
+    if (!group) {
+      return res.status(400).json({ error: "group is required" });
+    }
+
+    const wantsForce = checkForceKey(req, res);
+    if (wantsForce === null) return;
+
+    const leaves = await getGroupProductsByLeaf(section, group, { force: wantsForce });
+    res.json({ section, group, leaves });
+  } catch (err) {
+    console.error("Leaves error:", err);
+    res.status(500).json({ error: "Could not load this category's sub-sections." });
   }
 });
 

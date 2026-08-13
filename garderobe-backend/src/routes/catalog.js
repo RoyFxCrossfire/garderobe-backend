@@ -22,16 +22,17 @@ function checkForceKey(req, res) {
 }
 
 // GET /api/taxonomy?section=dames
-// Returns the sub-category group labels for a section (e.g. "Tops & Sets",
-// "Bottoms", "Accessories"), so the frontend can render tabs without us
-// hardcoding the list in two places.
+// Returns the sub-category groups (e.g. "Tops & Sets", "Bottoms") together
+// with each group's exact leaf items (e.g. "Women's Camis", "Jumpsuits"),
+// so the frontend can render both the tabs and a quick-jump dropdown.
 router.get("/taxonomy", (req, res) => {
   const section = req.query.section;
   if (!VALID_SECTIONS.includes(section)) {
     return res.status(400).json({ error: `section must be one of ${VALID_SECTIONS.join(", ")}` });
   }
   const taxonomy = getTaxonomy(section);
-  res.json({ section, groups: taxonomy ? Object.keys(taxonomy) : [] });
+  const groups = taxonomy ? Object.entries(taxonomy).map(([label, leaves]) => ({ label, leaves })) : [];
+  res.json({ section, groups });
 });
 
 // GET /api/catalog?section=dames&group=Bottoms&offset=0&limit=24&force=true

@@ -103,6 +103,50 @@ const TAXONOMY = {
   },
 };
 
+// CJ's own category assignment isn't always accurate — a garden tool can
+// end up filed under a clothing category on their end. As a safety net, we
+// ALSO check the actual product name for clothing-relevant keywords, and
+// drop anything that doesn't match. This is deliberately broader/simpler
+// than the exact taxonomy leaf names above (real product titles say things
+// like "Casual Long Sleeve Blouse", not the exact CJ category label).
+const NAME_KEYWORDS = {
+  dames: {
+    "Tops & Sets": [
+      "t-shirt", "tshirt", "tee", "shirt", "blouse", "top", "cami", "tank",
+      "vest", "hoodie", "sweatshirt", "jumpsuit", "romper", "dress", "sweater",
+      "suit", "sleeve", "pullover", "knit",
+    ],
+    Bottoms: ["legging", "skirt", "jean", "short", "pant", "trouser", "capri"],
+    "Outerwear & Jackets": ["blazer", "jacket", "coat", "trench", "wool", "leather", "suede", "fur", "parka"],
+    Accessories: ["scarf", "mask", "belt", "glove", "mitten", "sock", "hat", "cap"],
+  },
+  heren: {
+    "T-Shirts": ["t-shirt", "tshirt", "tee", "shirt", "sleeve", "top"],
+    Bottoms: ["pajama", "short", "cargo", "jean", "harem", "pant", "trouser", "sweatpant"],
+    "Outerwear & Jackets": [
+      "blazer", "sweater", "leather", "trench", "shirt", "jacket", "suit",
+      "hoodie", "sweatshirt", "wool", "parka", "coat", "pullover", "knit",
+    ],
+    "Underwear & Loungewear": ["sleep", "lounge", "short", "brief", "robe", "pajama", "boxer", "long john"],
+    Accessories: ["sock", "tie", "scarf", "glove", "mitten", "beanie", "skull", "belt"],
+  },
+};
+
+// Flattened whitelist for a whole gender (used by the "All" view and the
+// homepage "new arrivals" feed, where we're not filtering to one specific
+// sub-category but still want to exclude obviously unrelated products).
+function getGenderNameKeywords(section) {
+  const groups = NAME_KEYWORDS[section];
+  if (!groups) return null;
+  return [...new Set(Object.values(groups).flat())];
+}
+
+function productNameMatches(name, keywords) {
+  if (!keywords) return true; // no filter configured -> don't exclude anything
+  const lowerName = (name || "").toLowerCase();
+  return keywords.some((k) => lowerName.includes(k));
+}
+
 function getTaxonomy(section) {
   return TAXONOMY[section] || null;
 }
@@ -193,7 +237,7 @@ function applyMarkup(cjPrice) {
 // CJ's product list (up to `maxPages`, 100 per page — CJ's max) until we've
 // collected `size` products that actually have a valid price. A lot of CJ
 // products don't have a populated sellPrice, so we simply skip those.
-async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, force, maxPages, cacheKey }) {
+async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, force, maxPages, cacheKey, nameKeywords }) {
   const cache = readCache(PRODUCTS_CACHE_PATH) || {};
   const cached = cache[cacheKey];
   if (!force && cached && Date.now() - cached.fetchedAt < PRODUCTS_TTL_MS) {
@@ -242,6 +286,12 @@ async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, for
       const rawPrice = toNumber(p.sellPrice) ?? toNumber(p.discountPrice) ?? toNumber(p.nowPrice);
       if (rawPrice === null) continue;
 
+      // CJ's own category assignment can be wrong (e.g. a garden tool
+      // filed under a clothing category) — cross-check the actual product
+      // name against our keyword whitelist and skip anything that doesn't
+      // look like real clothing for this group.
+      if (!productNameMatches(p.nameEn, nameKeywords)) continue;
+
       collected.push({
         pid: p.id,
         name: p.nameEn,
@@ -276,7 +326,13 @@ async function fetchProductsForCategoryIds(categoryIds, productFlag, { size, for
 // cached pool for infinite scroll instead of hitting CJ again per scroll.
 async function getGenderProducts(section, { size = 100, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGenderCategoryIds(section);
-  return fetchProductsForCategoryIds(categoryIds, null, { size, force, maxPages, cacheKey: `gender:${section}` });
+  return fetchProductsForCategoryIds(categoryIds, null, {
+    size,
+    force,
+    maxPages,
+    cacheKey: `gender:${section}`,
+    nameKeywords: getGenderNameKeywords(section),
+  });
 }
 
 // Sub-category group feed (e.g. section=dames, group="Bottoms").
@@ -287,13 +343,20 @@ async function getGroupProducts(section, groupLabel, { size = 100, force = false
     force,
     maxPages,
     cacheKey: `group:${section}:${groupLabel}`,
+    nameKeywords: NAME_KEYWORDS[section]?.[groupLabel] || null,
   });
 }
 
 // Homepage "New arrivals" feed — CJ's own "New products" signal (flag 1).
 async function getNewProducts(section, { size = 40, force = false, maxPages = 8 } = {}) {
   const categoryIds = await resolveGenderCategoryIds(section);
-  return fetchProductsForCategoryIds(categoryIds, 1, { size, force, maxPages, cacheKey: `new:${section}` });
+  return fetchProductsForCategoryIds(categoryIds, 1, {
+    size,
+    force,
+    maxPages,
+    cacheKey: `new:${section}`,
+    nameKeywords: getGenderNameKeywords(section),
+  });
 }
 
 // Backward-compatible alias (older frontend builds may still call this name).
